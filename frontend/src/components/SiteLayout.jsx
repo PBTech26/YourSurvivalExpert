@@ -55,14 +55,46 @@ export default function SiteLayout({ children, ctaLabel = 'Start', onCta }) {
             {ctaLabel}
           </button>
         ) : (
-          <Link className="primary small" to="/">
+          <Link className="primary small" to="/?startChat=1#chat">
             Start
           </Link>
         )}
       </header>
       {children}
       <footer className="site-footer">
-        Preparedness should feel steady — not scary.
+        <div className="footer-content">
+          <div className="footer-col">
+            <div className="footer-brand">
+              <span className="brand-mark">YSE</span>
+              <strong>yoursurvivalexpert.ai</strong>
+            </div>
+            <p className="footer-tagline">Preparedness should feel steady — not scary.</p>
+          </div>
+          <div className="footer-col">
+            <h4>Navigation</h4>
+            <nav className="footer-nav">
+              <Link to="/">Home</Link>
+              <Link to="/about">About</Link>
+              <Link to="/contact">Contact</Link>
+            </nav>
+          </div>
+          <div className="footer-col">
+            <h4>Legal</h4>
+            <nav className="footer-nav">
+              <Link to="/privacy">Privacy Policy</Link>
+              <Link to="/terms">Terms of Service</Link>
+            </nav>
+          </div>
+          <div className="footer-col">
+            <h4>Connect</h4>
+            <p className="footer-contact">
+              Email: <a href="mailto:techteam@patriotbrandspr.com">techteam@patriotbrandspr.com</a>
+            </p>
+          </div>
+        </div>
+        <div className="footer-bottom">
+          <p>&copy; {new Date().getFullYear()} yoursurvivalexpert.ai. All rights reserved.</p>
+        </div>
       </footer>
     </div>
   )

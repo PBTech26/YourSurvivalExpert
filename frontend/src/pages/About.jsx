@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import SiteLayout from '../components/SiteLayout.jsx'
 import useSeo from '../hooks/useSeo.js'
 
@@ -12,7 +13,7 @@ export default function About() {
     <SiteLayout>
       <main className="page-shell">
         <section className="page-content" data-animate>
-          <h1>About yoursurvivalexpert.ai</h1>
+          <h1 className="text-gradient">About yoursurvivalexpert.ai</h1>
           <p>
             We help people prepare for disruptions without panic. The app combines calm guidance and
             a conversational AI expert to translate your situation into a personalized survival guide
@@ -36,9 +37,9 @@ export default function About() {
           <div className="cta-panel" data-animate>
             <h3>Ready for your personalized guide?</h3>
             <p>Start a quick conversation and get a practical plan tailored to you.</p>
-            <a className="primary" href="/">
+            <Link className="primary" to="/?startChat=1#chat">
               Start the conversation
-            </a>
+            </Link>
           </div>
         </section>
       </main>

@@ -12,7 +12,7 @@ export default function Terms() {
     <SiteLayout>
       <main className="page-shell">
         <section className="page-content legal" data-animate>
-          <h1>Terms of service</h1>
+          <h1 className="text-gradient">Terms of service</h1>
           <p>
             By using this site, you agree to the following terms. This service provides informational
             guidance and is not a substitute for professional or emergency services.
@@ -35,7 +35,7 @@ export default function Terms() {
             <h2>Contact</h2>
             <p>
               Questions about these terms? Email us at{' '}
-              <a href="mailto:hello@yoursurvivalexpert.ai">hello@yoursurvivalexpert.ai</a>.
+              <a href="mailto:techteam@patriotbrandspr.com">techteam@patriotbrandspr.com</a>.
             </p>
           </div>
         </section>

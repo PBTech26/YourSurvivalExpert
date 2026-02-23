@@ -8,10 +8,8 @@ const starterMessage =
 
 const emptyProfile = {
   preparingFor: '',
-  region: '',
   concern: '',
-  householdSize: '',
-  experience: '',
+  region: '',
 }
 
 const starterPrompts = [
@@ -74,15 +72,15 @@ export default function Home() {
   const [readyForEmail, setReadyForEmail] = useState(false)
   const [email, setEmail] = useState('')
   const [emailStatus, setEmailStatus] = useState('idle')
+  const [emailValid, setEmailValid] = useState(false)
   const chatEndRef = useRef(null)
+  const chatSectionRef = useRef(null)
 
   const profileSummary = useMemo(() => {
     return [
       { label: 'Preparing for', value: profile.preparingFor || 'Not shared yet' },
-      { label: 'Region', value: profile.region || 'Not shared yet' },
       { label: 'Primary concern', value: profile.concern || 'Not shared yet' },
-      { label: 'Household size', value: profile.householdSize || 'Not shared yet' },
-      { label: 'Experience level', value: profile.experience || 'Not shared yet' },
+      { label: 'Region', value: profile.region || 'Not shared yet' },
     ]
   }, [profile])
 
@@ -90,7 +88,34 @@ export default function Home() {
     return Object.values(profile).filter((value) => String(value).trim()).length
   }, [profile])
 
-  const completionPercent = Math.round((completionCount / 5) * 100)
+  const completionPercent = Math.round((completionCount / 3) * 100)
+
+  const validateEmail = (emailInput) => {
+    // RFC 5322 simplified email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    // More strict validation
+    if (!emailRegex.test(emailInput)) return false
+    
+    // Additional checks
+    const [localPart, domain] = emailInput.split('@')
+    
+    // Check local part validity
+    if (!localPart || localPart.length === 0 || localPart.length > 64) return false
+    if (/^\.|\.$|\.\./.test(localPart)) return false // No leading/trailing/double dots
+    
+    // Check domain validity
+    if (!domain || domain.length < 3) return false
+    if (!/^\w+(\.\w+)*\.\w{2,}$/.test(domain)) return false // Must have at least one dot and valid TLD
+    if (/^-|-$/.test(domain)) return false // No leading/trailing hyphens
+    
+    return true
+  }
+
+  const handleEmailChange = (event) => {
+    const value = event.target.value
+    setEmail(value)
+    setEmailValid(validateEmail(value))
+  }
 
   const seoTitle = `Survival Guide for ${selectedRegion.name} | yoursurvivalexpert.ai`
   const seoDescription =
@@ -169,11 +194,29 @@ export default function Home() {
     }, 0)
   }, [messages, isLoading, isChatActive])
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const shouldStartChat = params.get('startChat') === '1'
+    if (!shouldStartChat) return
+
+    setIsChatActive(true)
+    setMessages((current) =>
+      current.length === 0 ? [{ role: 'assistant', content: starterMessage }] : current
+    )
+
+    setTimeout(() => {
+      chatSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }, 0)
+  }, [])
+
   const activateChat = () => {
     setIsChatActive(true)
     if (messages.length === 0) {
       setMessages([{ role: 'assistant', content: starterMessage }])
     }
+    setTimeout(() => {
+      chatSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }, 0)
   }
 
   const handlePromptClick = (prompt) => {
@@ -225,7 +268,12 @@ export default function Home() {
 
   const submitEmail = async (event) => {
     event.preventDefault()
-    if (!email || emailStatus === 'sending') return
+    
+    // Double-check email validity before sending
+    if (!email || !emailValid || emailStatus === 'sending') {
+      setError('Please enter a valid email address.')
+      return
+    }
 
     setError('')
     setEmailStatus('sending')
@@ -261,7 +309,7 @@ export default function Home() {
         <section className="hero" data-animate>
           <div className="hero-copy">
             <p className="kicker">Calm guidance when it matters most</p>
-            <h1>Chat with an AI survival expert and get a personalized emergency guide.</h1>
+            <h1 className="text-gradient">Your Personal AI Survival Expert Custom Emergency Plans Built for You</h1>
             <p className="lede">
               Your Survival Expert helps you plan for outages, storms, and disruptions. Start a
               quick conversation and receive a tailored PDF guide that fits your household and
@@ -319,9 +367,9 @@ export default function Home() {
 
         <div className="divider" aria-hidden="true" />
 
-        <section className="chat-section" data-animate>
+        <section id="chat" ref={chatSectionRef} className="chat-section" data-animate>
           <div className="chat-header">
-            <div>
+            <div className="chat-intro">
               <p className="kicker">Talk with the Survival Expert</p>
               <h2>Start a calm conversation when you are ready.</h2>
               <p className="lede">
@@ -340,12 +388,14 @@ export default function Home() {
                   </button>
                 ))}
               </div>
+              {!isChatActive && (
+                <div className="chat-intro-cta">
+                  <button className="primary" type="button" onClick={activateChat}>
+                    Start the conversation
+                  </button>
+                </div>
+              )}
             </div>
-            {!isChatActive && (
-              <button className="primary" type="button" onClick={activateChat}>
-                Start the conversation
-              </button>
-            )}
           </div>
 
           <div className="chat-layout">
@@ -398,7 +448,7 @@ export default function Home() {
                 <div ref={chatEndRef} />
               </div>
 
-              {isChatActive && (
+              {isChatActive && !readyForEmail && (
                 <form className="chat-input" onSubmit={sendMessage}>
                   <input
                     type="text"
@@ -416,21 +466,37 @@ export default function Home() {
               {readyForEmail && (
                 <form className="email-capture" onSubmit={submitEmail}>
                   <div>
-                    <label htmlFor="email">Email for your PDF guide</label>
-                    <input
-                      id="email"
-                      type="email"
-                      placeholder="you@example.com"
-                      value={email}
-                      onChange={(event) => setEmail(event.target.value)}
-                      disabled={emailStatus === 'sent'}
-                      required
-                    />
+                    <label htmlFor="email">Email</label>
+                    <div className="email-input-wrapper">
+                      <input
+                        id="email"
+                        type="email"
+                        placeholder="Email"
+                        value={email}
+                        onChange={handleEmailChange}
+                        disabled={emailStatus === 'sent'}
+                        required
+                        className={email.length > 0 ? (emailValid ? 'valid' : 'invalid') : ''}
+                      />
+                      {email.length > 0 && (
+                        <span className={`email-indicator ${emailValid ? 'valid' : 'invalid'}`}>
+                          {emailValid ? '✓' : '✗'}
+                        </span>
+                      )}
+                    </div>
+                    {email.length > 0 && !emailValid && (
+                      <p className="email-hint">
+                        Please enter a valid email address to receive your PDF guide.
+                      </p>
+                    )}
+                    {email.length > 0 && emailValid && (
+                      <p className="email-hint valid">Email format looks good</p>
+                    )}
                   </div>
                   <button
                     className="primary"
                     type="submit"
-                    disabled={emailStatus === 'sending' || emailStatus === 'sent'}
+                    disabled={!emailValid || emailStatus === 'sending' || emailStatus === 'sent'}
                   >
                     {emailStatus === 'sending' ? 'Sending...' : 'Send my guide'}
                   </button>

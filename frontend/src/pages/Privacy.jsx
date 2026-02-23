@@ -12,7 +12,7 @@ export default function Privacy() {
     <SiteLayout>
       <main className="page-shell">
         <section className="page-content legal" data-animate>
-          <h1>Privacy policy</h1>
+          <h1 className="text-gradient">Privacy policy</h1>
           <p>
             We respect your privacy and keep data collection minimal. This policy explains what we
             collect and how it is used.

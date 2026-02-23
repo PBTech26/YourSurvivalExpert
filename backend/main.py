@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import base64
 import os
 import re
 import logging
 from io import BytesIO
 from typing import Any, Dict, List, Optional
 
+import smtplib
+import ssl
 import requests
+from email.message import EmailMessage
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +17,8 @@ from openai import OpenAI
 from pydantic import BaseModel, EmailStr
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
+from reportlab.lib.utils import simpleSplit
+from reportlab.lib import colors
 from reportlab.pdfgen import canvas
 
 # -------------------------------------------------
@@ -30,10 +34,11 @@ APP_NAME = "yoursurvivalexpert.ai"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-MAROPOST_API_KEY = os.getenv("MAROPOST_API_KEY")
-MAROPOST_ACCOUNT_ID = os.getenv("MAROPOST_ACCOUNT_ID")
-MAROPOST_TAG_ID = os.getenv("MAROPOST_TAG_ID")
-MAROPOST_FROM_EMAIL = os.getenv("MAROPOST_FROM_EMAIL")
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASS = os.getenv("SMTP_PASS")
+SMTP_FROM = os.getenv("SMTP_FROM") or SMTP_USER
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -53,18 +58,14 @@ app.add_middleware(
 
 PROFILE_TEMPLATE: Dict[str, str] = {
     "preparingFor": "",
-    "region": "",
     "concern": "",
-    "householdSize": "",
-    "experience": "",
+    "region": "",
 }
 
 QUESTION_ORDER = [
     ("preparingFor", "Who are you preparing for — yourself or a household/family?"),
-    ("region", "What general region are you in?"),
     ("concern", "What situation are you most concerned about?"),
-    ("householdSize", "How many people are in your household?"),
-    ("experience", "Would you describe your experience as beginner, intermediate, or advanced?"),
+    ("region", "What general region are you in?"),
 ]
 
 CHAT_PROMPT = (
@@ -72,19 +73,29 @@ CHAT_PROMPT = (
     "Speak clearly and practically. Ask one question at a time. "
     "Avoid fear-based language. "
     "Align guidance with the site context provided. Do not quote or reproduce site text verbatim; paraphrase. "
-    "Gather the following information naturally: preparingFor, region, concern, householdSize, experience. "
-    "When complete, summarize briefly and ask for an email to send a personalized PDF guide."
+    "Gather the following information naturally: preparingFor, concern, region. Ask exactly 3 questions, one at a time.\n\n"
+    "CRITICAL FORMAT REQUIREMENT: After EVERY question, ALWAYS provide 3-4 bullet-point guidelines to help the user think about their answer. "
+    "Use ONLY dashes (no dots, no numbers). Guidelines must be on separate lines starting with dash.\n\n"
+    "MANDATORY STRUCTURE:\n"
+    "[Your question here?]\n"
+    "- Guideline one about this topic\n"
+    "- Guideline two about this topic\n"
+    "- Guideline three about this topic\n\n"
+    "You MUST follow this format for EVERY question before moving forward.\n\n"
+    "When all 3 fields (preparingFor, concern, region) are collected, "
+    "provide a brief summary of their profile and end with exactly this text:\n"
+    "Ready for your personalized guide? Reply with your email address and I'll send it to you."
 )
 
 GUIDE_PROMPT = (
     "You are a calm survival expert. "
-    "Write a personalized emergency preparedness guide.\n\n"
+    "Write a personalized emergency preparedness guide based on the reference material provided.\n\n"
     "Structure:\n"
     "- Short overview paragraph\n"
-    "- Checklist with bullet points\n"
+    "- Checklist with bullet points (extract and adapt from the reference)\n"
     "- Practical, low-stress next steps\n\n"
     "Tone: calm, practical, non-alarmist.\n"
-    "Align guidance with the site context provided. Do not quote or reproduce site text verbatim; paraphrase."
+    "Use the reference material to ground your recommendations. Paraphrase and personalize, don't quote directly."
 )
 
 SITE_CONTEXT = (
@@ -93,6 +104,8 @@ SITE_CONTEXT = (
     "responsible self-protection, and confidence through clear, structured guidance. "
     "The tone is supportive and capability-building, not alarmist."
 )
+
+READY_NETWORK_URL = "https://thereadynetwork.us/?s=Creating+Your+Family+Emergency+Plan"
 
 # -------------------------------------------------
 # Models
@@ -147,24 +160,11 @@ def extract_profile_from_message(profile: Dict[str, str], message: Optional[str]
         elif re.search(r"\b(myself|yourself|self|just me|solo|single|only me|for me|me)\b", lower):
             updated["preparingFor"] = "Myself"
 
-    if not updated["experience"]:
-        if "beginner" in lower:
-            updated["experience"] = "Beginner"
-        elif "intermediate" in lower:
-            updated["experience"] = "Intermediate"
-        elif re.search(r"\b(advanced|advance|expert|experienced)\b", lower):
-            updated["experience"] = "Advanced"
-
     if not updated["concern"]:
         cleaned = re.sub(r"[^a-z\s-]", "", lower).strip()
         has_generic_question = re.search(r"\b(what|which|choices|options)\b", lower)
         if 3 <= len(cleaned) <= 40 and not is_question and not has_generic_question:
             updated["concern"] = message.strip()
-
-    if not updated["householdSize"]:
-        size_match = re.search(r"\b(\d{1,2})\b", message)
-        if size_match:
-            updated["householdSize"] = size_match.group(1)
 
     if not updated["region"]:
         region_match = re.search(r"\b(?:in|from|near)\s+([A-Za-z\s]{2,40})", message, re.IGNORECASE)
@@ -202,6 +202,47 @@ def get_missing_fields(profile: Dict[str, str]) -> List[str]:
     return [key for key, _ in QUESTION_ORDER if not profile.get(key)]
 
 
+def validate_email(email: str) -> bool:
+    """Validate email format."""
+    if not email or not isinstance(email, str):
+        return False
+    
+    # RFC 5322 simplified email validation
+    email_regex = r'^[^\s@]+@[^\s@]+\.[^\s@]+$'
+    if not re.match(email_regex, email):
+        return False
+    
+    local_part, domain = email.rsplit('@', 1)
+    
+    # Check local part
+    if not local_part or len(local_part) > 64:
+        return False
+    if local_part.startswith('.') or local_part.endswith('.') or '..' in local_part:
+        return False
+    
+    # Check domain
+    if len(domain) < 3 or not re.match(r'^\w+(\.\w+)*\.\w{2,}$', domain):
+        return False
+    if domain.startswith('-') or domain.endswith('-'):
+        return False
+    
+    return True
+
+
+def detect_email_in_message(message: str) -> Optional[str]:
+    """Extract email address from message if present."""
+    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+    match = re.search(email_pattern, message)
+    return match.group(0) if match else None
+
+
+def detect_email_candidate(message: str) -> Optional[str]:
+    """Extract email-like token (including malformed) for validation feedback."""
+    candidate_pattern = r'\b[^\s@]+@[^\s]+\b'
+    match = re.search(candidate_pattern, message)
+    return match.group(0) if match else None
+
+
 def build_chat_reply(profile: Dict[str, str], missing: List[str]) -> str:
     if not missing:
         return (
@@ -226,6 +267,29 @@ def call_openai(messages: List[Dict[str, str]]) -> Optional[str]:
         return None
 
 
+def fetch_guide_content_from_url(url: str) -> str:
+    """Fetch and extract text content from a URL."""
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        # Simple text extraction: remove HTML tags and clean up
+        import re as regex
+        text = response.text
+        # Remove script and style content
+        text = regex.sub(r'<script[^>]*>.*?</script>', '', text, flags=regex.DOTALL)
+        text = regex.sub(r'<style[^>]*>.*?</style>', '', text, flags=regex.DOTALL)
+        # Remove HTML tags
+        text = regex.sub(r'<[^>]+>', '\n', text)
+        # Clean up whitespace
+        text = regex.sub(r'\n\s*\n', '\n\n', text)
+        text = '\n'.join(line.strip() for line in text.split('\n') if line.strip())
+        # Return first 3000 characters to keep it concise
+        return text[:3000]
+    except Exception as e:
+        logging.warning(f"Failed to fetch URL content: {e}")
+        return ""
+
+
 def build_guide_text(profile: Dict[str, str]) -> str:
     fallback = (
         "Overview\n"
@@ -239,12 +303,16 @@ def build_guide_text(profile: Dict[str, str]) -> str:
         "Start with essentials and expand gradually."
     )
 
+    # Fetch reference content from The Ready Network
+    reference_content = fetch_guide_content_from_url(READY_NETWORK_URL)
+    reference_section = f"\nReference material from The Ready Network:\n{reference_content}" if reference_content else ""
+
     messages = [
         {
             "role": "system",
-            "content": f"{GUIDE_PROMPT}\n\nSite context:\n{SITE_CONTEXT}",
+            "content": f"{GUIDE_PROMPT}\n\nSite context:\n{SITE_CONTEXT}{reference_section}",
         },
-        {"role": "user", "content": str(profile)},
+        {"role": "user", "content": f"User profile:\n{str(profile)}\n\nGenerate a personalized guide based on this profile and the reference material."},
     ]
 
     return call_openai(messages) or fallback
@@ -258,25 +326,110 @@ def create_pdf(title: str, body: str, profile: Dict[str, str]) -> bytes:
     pdf = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
 
-    pdf.setFont("Helvetica-Bold", 18)
-    pdf.drawString(inch, height - inch, title)
+    left_margin = inch
+    right_margin = inch
+    top_margin = 0.75 * inch
+    bottom_margin = 0.75 * inch
+    content_width = width - left_margin - right_margin
+    line_height = 0.2 * inch
+    y = height - top_margin
+
+    def new_page() -> None:
+        nonlocal y
+        pdf.showPage()
+        pdf.setFont("Helvetica", 11)
+        y = height - top_margin
+
+    def ensure_space(lines_needed: int = 1) -> None:
+        nonlocal y
+        needed_height = max(lines_needed, 1) * line_height
+        if y - needed_height < bottom_margin:
+            new_page()
+
+    pdf.setFont("Helvetica-Bold", 24)
+    pdf.setFillColor(colors.HexColor("#2f4a3f"))
+    title_lines = simpleSplit(title, "Helvetica-Bold", 24, content_width)
+    ensure_space(len(title_lines) + 1)
+    for title_line in title_lines:
+        title_width = pdf.stringWidth(title_line, "Helvetica-Bold", 24)
+        title_x = (width - title_width) / 2
+        pdf.drawString(title_x, y, title_line)
+        y -= 0.32 * inch
+
+    y -= 0.2 * inch
+    pdf.setStrokeColor(colors.HexColor("#b07a4c"))
+    pdf.setLineWidth(1.5)
+    pdf.line(left_margin, y, width - right_margin, y)
+    y -= 0.25 * inch
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.setFillColor(colors.HexColor("#1f1c1a"))
+    pdf.drawString(left_margin, y, "Your Profile")
+    y -= 0.22 * inch
+
+    pdf.setFont("Helvetica", 10)
+    pdf.setFillColor(colors.HexColor("#4c4036"))
+    for key, value in profile.items():
+        display_key = key.replace("preparingFor", "Preparing For").replace("concern", "Primary Concern").replace("region", "Region")
+        profile_line = f"• {display_key}: {value}"
+        wrapped = simpleSplit(profile_line, "Helvetica", 10, content_width - 0.2 * inch)
+        ensure_space(len(wrapped) + 1)
+        for idx, segment in enumerate(wrapped):
+            indent = left_margin if idx == 0 else left_margin + 0.15 * inch
+            pdf.drawString(indent, y, segment)
+            y -= line_height
+
+    y -= 0.15 * inch
+    pdf.setStrokeColor(colors.HexColor("#d9d2c3"))
+    pdf.setLineWidth(0.5)
+    pdf.line(left_margin, y, width - right_margin, y)
+    y -= 0.25 * inch
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.setFillColor(colors.HexColor("#1f1c1a"))
+    pdf.drawString(left_margin, y, "Your Guide")
+    y -= 0.22 * inch
 
     pdf.setFont("Helvetica", 11)
-    y = height - 1.5 * inch
+    pdf.setFillColor(colors.HexColor("#1f1c1a"))
+    for raw_line in body.splitlines():
+        clean_line = raw_line.strip()
+        if not clean_line:
+            y -= 0.1 * inch
+            if y < bottom_margin:
+                new_page()
+            continue
 
-    for k, v in profile.items():
-        pdf.drawString(inch, y, f"{k}: {v}")
-        y -= 0.22 * inch
+        is_section_header = clean_line.startswith("##") or (clean_line.isupper() and len(clean_line) < 40)
+        is_bullet = clean_line.startswith("-") or clean_line.startswith("•")
 
-    y -= 0.3 * inch
-
-    for line in body.splitlines():
-        if y < inch:
-            pdf.showPage()
+        if is_section_header:
+            pdf.setFont("Helvetica-Bold", 12)
+            pdf.setFillColor(colors.HexColor("#2f4a3f"))
+            display_text = clean_line.replace("##", "").strip()
+            ensure_space(2)
+            pdf.drawString(left_margin, y, display_text)
+            y -= 0.28 * inch
+        elif is_bullet:
             pdf.setFont("Helvetica", 11)
-            y = height - inch
-        pdf.drawString(inch, y, line)
-        y -= 0.22 * inch
+            pdf.setFillColor(colors.HexColor("#1f1c1a"))
+            display_text = clean_line.lstrip("-•").strip()
+            wrapped_lines = simpleSplit(display_text, "Helvetica", 11, content_width - 0.3 * inch)
+            ensure_space(len(wrapped_lines) + 1)
+            for idx, segment in enumerate(wrapped_lines):
+                if idx == 0:
+                    pdf.drawString(left_margin + 0.15 * inch, y, "• " + segment)
+                else:
+                    pdf.drawString(left_margin + 0.3 * inch, y, segment)
+                y -= line_height
+        else:
+            pdf.setFont("Helvetica", 11)
+            pdf.setFillColor(colors.HexColor("#1f1c1a"))
+            wrapped_lines = simpleSplit(clean_line, "Helvetica", 11, content_width)
+            ensure_space(len(wrapped_lines) + 1)
+            for segment in wrapped_lines:
+                pdf.drawString(left_margin, y, segment)
+                y -= line_height
 
     pdf.save()
     buffer.seek(0)
@@ -284,71 +437,27 @@ def create_pdf(title: str, body: str, profile: Dict[str, str]) -> bytes:
 
 
 def send_email(email: str, pdf_bytes: bytes) -> None:
-    if not MAROPOST_API_KEY or not MAROPOST_ACCOUNT_ID:
-        logging.warning("Maropost not configured.")
+    if not SMTP_USER or not SMTP_PASS or not SMTP_FROM:
+        logging.warning("SMTP not configured.")
         return
 
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": f"Bearer {MAROPOST_API_KEY}",
-    }
-
-    # ---- CREATE CONTACT ----
-    contact_payload = {
-        "contact": {
-            "email": email,
-            "first_name": "Survival",
-            "last_name": "Guide",
-            "tags": [int(MAROPOST_TAG_ID)] if MAROPOST_TAG_ID else [],
-        }
-    }
-
-    contact_url = f"https://api.maropost.com/accounts/{MAROPOST_ACCOUNT_ID}/contacts"
-
-    contact_res = requests.post(
-        contact_url,
-        headers=headers,
-        json=contact_payload,
-        timeout=15,
+    message = EmailMessage()
+    message["From"] = SMTP_FROM
+    message["To"] = email
+    message["Subject"] = "Your Personalized Survival Guide"
+    message.set_content("Your personalized survival guide is attached.")
+    message.add_attachment(
+        pdf_bytes,
+        maintype="application",
+        subtype="pdf",
+        filename="survival-guide.pdf",
     )
 
-    logging.info(f"Contact response: {contact_res.status_code} - {contact_res.text}")
-
-    # ---- SEND EMAIL ----
-    pdf_base64 = base64.b64encode(pdf_bytes).decode()
-
-    email_payload = {
-        "email": {
-            "from": {
-                "email": MAROPOST_FROM_EMAIL,
-                "name": "Your Survival Expert"
-            },
-            "to": [{"email": email}],
-            "subject": "Your Personalized Survival Guide",
-            "html_body": "<p>Your personalized survival guide is attached.</p>",
-            "attachments": [
-                {
-                    "file_name": "survival-guide.pdf",
-                    "content": pdf_base64
-                }
-            ],
-        }
-    }
-
-    email_url = f"https://api.maropost.com/accounts/{MAROPOST_ACCOUNT_ID}/emails"
-
-    email_res = requests.post(
-        email_url,
-        headers=headers,
-        json=email_payload,
-        timeout=20,
-    )
-
-    logging.info(f"Email response: {email_res.status_code} - {email_res.text}")
-
-    if email_res.status_code >= 400:
-        logging.error("Maropost email send failed.")
+    context = ssl.create_default_context()
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.starttls(context=context)
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(message)
 
 # -------------------------------------------------
 # Routes
@@ -365,6 +474,43 @@ def chat(req: ChatRequest):
     latest_user = next((m for m in reversed(req.messages) if m.role == "user"), None)
     profile = extract_profile_from_message(profile, latest_user.content if latest_user else None)
     missing = get_missing_fields(profile)
+    latest_text = latest_user.content if latest_user else ""
+
+    if latest_text:
+        email_candidate = detect_email_candidate(latest_text)
+        if email_candidate and not validate_email(email_candidate):
+            next_question = dict(QUESTION_ORDER)[missing[0]] if missing else None
+            extra = f" {next_question}" if next_question else ""
+            return {
+                "reply": (
+                    f"'{email_candidate}' is not a valid email format. "
+                    "Please provide a correct email like name@example.com."
+                    f"{extra}"
+                ),
+                "profile": profile,
+                "readyForEmail": not missing,
+            }
+
+    if latest_text:
+        detected_email = detect_email_in_message(latest_text)
+        if detected_email and missing:
+            return {
+                "reply": (
+                    "Thanks. I will collect your email after we finish your profile. "
+                    f"{dict(QUESTION_ORDER)[missing[0]]}"
+                ),
+                "profile": profile,
+                "readyForEmail": False,
+            }
+        if detected_email and not missing:
+            return {
+                "reply": (
+                    "That email format looks valid. Please enter it in the email field below "
+                    "and click 'Send my guide'."
+                ),
+                "profile": profile,
+                "readyForEmail": True,
+            }
 
     messages = [
         {
@@ -377,7 +523,11 @@ def chat(req: ChatRequest):
         *[m.dict() for m in req.messages[-10:]],
     ]
 
-    reply = call_openai(messages) or build_chat_reply(profile, missing)
+    ai_reply = call_openai(messages)
+    if missing and ai_reply and re.search(r"\bemail\b", ai_reply, re.IGNORECASE):
+        reply = build_chat_reply(profile, missing)
+    else:
+        reply = ai_reply or build_chat_reply(profile, missing)
 
     return {
         "reply": reply,
